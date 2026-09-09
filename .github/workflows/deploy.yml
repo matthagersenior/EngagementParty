@@ -54,3 +54,28 @@ jobs:
         run: npm run db:migrate:remote
       - name: Deploy Worker
         run: npm run deploy
+      - name: Production route smoke check
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://engagement-party.matthagersr.workers.dev"
+          check_path() {
+            local path="$1"
+            local expected_root="$2"
+            local body_file
+            body_file="$(mktemp)"
+            local code
+            code="$(curl --silent --show-error --max-time 20 --output "$body_file" --write-out '%{http_code}' --location-trusted --max-redirs 0 "$base$path" || true)"
+            echo "$path -> HTTP $code"
+            head -c 300 "$body_file" || true
+            echo
+            if [ "$expected_root" = "yes" ]; then
+              test "$code" = "200" || { echo "Public RSVP root must return 200"; exit 1; }
+            else
+              test "$code" != "404" || { echo "Protected admin route unexpectedly returned 404"; exit 1; }
+            fi
+          }
+          check_path "/" yes
+          check_path "/admin" no
+          check_path "/api/admin/stats" no
+          check_path "/api/admin/rsvps" no
