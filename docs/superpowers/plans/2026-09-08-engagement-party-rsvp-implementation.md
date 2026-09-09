@@ -4,7 +4,7 @@
 
 **Goal:** Build and deploy a mobile-first Cloudflare Worker + D1 engagement-party RSVP app with household/group submissions, per-person attendance, secure guest editing, a Cloudflare Access-protected admin dashboard, and CSV export.
 
-**Architecture:** One TypeScript Cloudflare Worker handles JSON APIs and delegates non-API requests to Workers Static Assets in `public/`. D1 stores one household row plus related guest rows; public edit access uses a 32-byte random bearer token whose SHA-256 hash is the only token material stored in D1. The admin UI and every `/api/admin/*` route are designed to sit behind a path-scoped Cloudflare Access application in production.
+**Architecture:** One TypeScript Cloudflare Worker handles JSON APIs and delegates non-API requests to Workers Static Assets in `public/`. D1 stores one household row plus related guest rows. Public edit access uses a 32-byte random bearer token whose SHA-256 hash is the only token material persisted. The admin UI and every `/api/admin/*` route are protected by Cloudflare Access in production.
 
 **Tech Stack:** TypeScript, Cloudflare Workers, Workers Static Assets, Cloudflare D1, Wrangler, Vitest, `@cloudflare/vitest-pool-workers`, vanilla HTML/CSS/JavaScript.
 
@@ -18,48 +18,40 @@
 - Static asset directory: `public/`, bound as `ASSETS`.
 - D1 binding name: `DB`.
 - Public routes: `/`, `/edit`, `/api/rsvps`, `/api/rsvps/edit`.
-- Protected production routes: `/admin*` and `/api/admin/*` via Cloudflare Access.
-- One household/group submission contains 1–50 named people.
+- Protected production routes: `/admin*` and `/api/admin/*` through Cloudflare Access.
+- Each household/group contains 1–50 named people.
 - Attendance values are exactly `attending`, `not_attending`, or `unsure`.
-- Guest edit tokens are 32 random bytes encoded base64url; only lowercase hex SHA-256 hashes are persisted.
-- Public edit URLs use `/edit#token=<token>`; JavaScript sends the raw token only in `Authorization: Bearer <token>`.
-- Same-origin API only; do not add permissive CORS.
+- Edit tokens are 32 random bytes encoded base64url; only lowercase-hex SHA-256 hashes are stored.
+- Private edit URLs use `/edit#token=<token>` and send the token only through `Authorization: Bearer <token>`.
+- Same-origin API only; no permissive CORS.
 - State-changing requests reject a mismatched `Origin` header.
 - Security headers include `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and a restrictive CSP.
-- No guest accounts, meal choices, seating charts, payments, photos, or multi-event support in v1.
+- No guest accounts, public RSVP directory, meal choices, seating charts, payments, photos, or multi-event support in v1.
 
----
+## Planned Files
 
-## File Structure
-
-- `package.json` — scripts and development dependencies.
-- `tsconfig.json` — strict TypeScript config for Workers.
-- `wrangler.jsonc` — Worker, static asset, and D1 configuration.
-- `vitest.config.ts` — Workers test-pool configuration.
-- `migrations/0001_initial.sql` — households/guests schema and indexes.
-- `src/types.ts` — shared Worker bindings and RSVP domain types.
-- `src/validation.ts` — input normalization and exact validation rules.
-- `src/security.ts` — token generation/hash, bearer parsing, origin guard, headers.
-- `src/db.ts` — D1 household/guest persistence and query functions.
-- `src/csv.ts` — CSV escaping and export generation.
+- `package.json` — scripts and dev dependencies.
+- `tsconfig.json` — strict Worker TypeScript config.
+- `wrangler.jsonc` — Worker/static-assets/D1 config using the real D1 ID returned by Cloudflare.
+- `vitest.config.ts` — Workers test-pool config.
+- `migrations/0001_initial.sql` — D1 schema.
+- `src/types.ts` — bindings and domain types.
+- `src/validation.ts` — input normalization/validation.
+- `src/security.ts` — token helpers, bearer parsing, origin guard, headers.
+- `src/db.ts` — D1 persistence/query functions.
+- `src/csv.ts` — safe CSV generation.
 - `src/admin.ts` — admin stats/list/update/export handlers.
-- `src/index.ts` — route dispatch and static asset fallback.
-- `public/index.html` — public RSVP form shell.
-- `public/edit.html` — private edit shell.
-- `public/admin.html` — organizer dashboard shell.
-- `public/styles.css` — shared mobile-first presentation.
-- `public/rsvp.js` — public form behavior and submission.
-- `public/edit.js` — edit-token extraction, load, and update behavior.
-- `public/admin.js` — stats, search/filter, editing, and CSV download.
-- `test/validation.test.ts` — validation unit tests.
-- `test/security.test.ts` — token/origin/security tests.
-- `test/api.test.ts` — Worker integration tests against D1.
-- `test/csv.test.ts` — CSV shape/escaping tests.
-- `README.md` — local setup, D1 creation/migration, deploy, Access setup, QR instructions.
+- `src/index.ts` — route dispatch and static-asset fallback.
+- `public/index.html`, `public/rsvp.js` — public RSVP form.
+- `public/edit.html`, `public/edit.js` — private guest editing.
+- `public/admin.html`, `public/admin.js` — organizer dashboard.
+- `public/styles.css` — shared mobile-first styles.
+- `test/validation.test.ts`, `test/security.test.ts`, `test/api.test.ts`, `test/csv.test.ts` — automated tests.
+- `README.md` — local/deploy/Access/QR instructions.
 
 ---
 
-### Task 1: Scaffold the Worker and D1 schema
+### Task 1: Create Cloudflare D1 resource and scaffold the Worker
 
 **Files:**
 - Create: `package.json`
@@ -75,12 +67,13 @@
 - Create: `public/styles.css`
 
 **Interfaces:**
-- Produces `Env` with `DB: D1Database` and `ASSETS: Fetcher`.
-- Produces a Worker `fetch(request, env)` entry point that routes `/api/*` to API handling and all other requests to static assets.
+- Produces `Env { DB: D1Database; ASSETS: Fetcher }`.
+- Produces a Worker `fetch(request, env)` entry point.
+- Produces a real D1 database named `engagement-party-db` and records its returned ID directly in `wrangler.jsonc`.
 
-- [ ] **Step 1: Create the package and scripts**
+- [ ] **Step 1: Initialize npm metadata**
 
-`package.json`:
+Create `package.json`:
 
 ```json
 {
@@ -106,17 +99,50 @@
 }
 ```
 
+Run `npm install`. Expected: `package-lock.json` is created and install exits successfully.
+
+- [ ] **Step 2: Verify Cloudflare authentication and create D1**
+
 Run:
 
 ```bash
-npm install
+npx wrangler whoami
+npx wrangler d1 create engagement-party-db
 ```
 
-Expected: lockfile is created and install exits successfully.
+Use the exact `database_id` returned by the second command in the next step. Do not invent or reuse an ID from another project.
 
-- [ ] **Step 2: Add strict Worker TypeScript configuration**
+- [ ] **Step 3: Create Worker configuration with the returned D1 ID**
 
-`tsconfig.json`:
+Create `wrangler.jsonc` with:
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "engagement-party",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-08",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "engagement-party-db",
+      "database_id": "<the exact ID printed by `wrangler d1 create engagement-party-db`>",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
+```
+
+The angle-bracket instruction above is documentation for the implementer, not literal file content; the committed file must contain the actual Cloudflare ID.
+
+- [ ] **Step 4: Add strict TypeScript configuration**
+
+Create `tsconfig.json`:
 
 ```json
 {
@@ -134,37 +160,9 @@ Expected: lockfile is created and install exits successfully.
 }
 ```
 
-- [ ] **Step 3: Add Wrangler configuration**
+- [ ] **Step 5: Add D1 schema**
 
-`wrangler.jsonc`:
-
-```jsonc
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "engagement-party",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-09-08",
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "engagement-party-db",
-      "database_id": "REPLACE_AFTER_D1_CREATION",
-      "migrations_dir": "migrations"
-    }
-  ]
-}
-```
-
-The implementation session must replace `REPLACE_AFTER_D1_CREATION` immediately after creating the actual D1 database; it must not be deployed with the placeholder value.
-
-- [ ] **Step 4: Add the initial D1 migration**
-
-`migrations/0001_initial.sql`:
+Create `migrations/0001_initial.sql`:
 
 ```sql
 PRAGMA foreign_keys = ON;
@@ -202,9 +200,28 @@ CREATE INDEX idx_guests_household_id ON guests(household_id);
 CREATE INDEX idx_guests_attendance ON guests(attendance);
 ```
 
-- [ ] **Step 5: Add bindings/types and a minimal route shell**
+- [ ] **Step 6: Configure Workers Vitest**
 
-`src/types.ts` must define:
+Create `vitest.config.ts`:
+
+```ts
+import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
+
+export default defineWorkersConfig({
+  test: {
+    poolOptions: {
+      workers: {
+        wrangler: { configPath: './wrangler.jsonc' },
+        miniflare: { d1Databases: ['DB'] }
+      }
+    }
+  }
+});
+```
+
+- [ ] **Step 7: Create bindings and route shell**
+
+`src/types.ts`:
 
 ```ts
 export interface Env {
@@ -215,13 +232,18 @@ export interface Env {
 export type Attendance = 'attending' | 'not_attending' | 'unsure';
 ```
 
-`src/index.ts` initially returns JSON 404 for unknown `/api/*` routes and delegates non-API requests to `env.ASSETS.fetch(request)`.
+`src/index.ts` initially returns JSON `404` for unknown `/api/*` paths and delegates all other requests to `env.ASSETS.fetch(request)`.
 
-- [ ] **Step 6: Create simple static shells**
+- [ ] **Step 8: Create simple semantic HTML shells**
 
-Create valid semantic HTML documents for `/`, `/edit`, and `/admin`; each loads `/styles.css`. `index.html` includes heading `Engagement Party RSVP`, `edit.html` includes `Update your RSVP`, and `admin.html` includes `Engagement Party Responses`.
+Create valid HTML pages whose headings are exactly:
+- `/index.html`: `Engagement Party RSVP`
+- `/edit.html`: `Update your RSVP`
+- `/admin.html`: `Engagement Party Responses`
 
-- [ ] **Step 7: Verify scaffold**
+Each page loads `/styles.css`.
+
+- [ ] **Step 9: Verify and commit**
 
 Run:
 
@@ -230,9 +252,9 @@ npm run typecheck
 npm test
 ```
 
-Expected: typecheck succeeds; Vitest runs with zero/future tests without configuration errors.
+Expected: no TypeScript errors and no Vitest configuration error.
 
-- [ ] **Step 8: Commit**
+Commit:
 
 ```bash
 git add package.json package-lock.json tsconfig.json wrangler.jsonc vitest.config.ts migrations src public
@@ -241,47 +263,34 @@ git commit -m "chore: scaffold engagement party worker"
 
 ---
 
-### Task 2: Implement exact RSVP normalization and validation
+### Task 2: Implement RSVP domain types and exact validation
 
 **Files:**
+- Modify: `src/types.ts`
 - Create: `src/validation.ts`
 - Create: `test/validation.test.ts`
-- Modify: `src/types.ts`
 
 **Interfaces:**
-- Produces `RsvpInput`, `GuestInput`, `ValidationError` types.
-- Produces `validateRsvpInput(value: unknown): RsvpInput` which either returns normalized input or throws `ValidationError` with field errors.
+- Produces `GuestInput`, `RsvpInput`, `ValidationError`.
+- Produces `validateRsvpInput(value: unknown): RsvpInput`.
 
-- [ ] **Step 1: Write failing validation tests**
+- [ ] **Step 1: Write failing tests**
 
-Cover:
-- valid household with two people and different attendance values;
-- zero people rejected;
-- 51 people rejected;
-- invalid attendance rejected;
-- `willing_to_help=true` requires help text;
-- `willing_to_bring=true` requires bring text;
-- false help/bring normalizes details to `null`;
-- all maximum lengths from the spec;
-- practical email validation.
+Cover valid multi-person input, zero people, 51 people, invalid attendance, required help/bring details, null normalization when help/bring is false, every maximum length from the spec, and practical email validation.
 
-Use a reusable valid fixture and explicit assertions such as:
+Representative assertion:
 
 ```ts
 expect(() => validateRsvpInput({ ...valid, people: [] })).toThrow(ValidationError);
 ```
 
-- [ ] **Step 2: Run the tests and confirm RED**
+- [ ] **Step 2: Run RED**
 
-```bash
-npm test -- test/validation.test.ts
-```
+Run `npm test -- test/validation.test.ts`. Expected: failure because the validator does not exist.
 
-Expected: failures because `validateRsvpInput` is not implemented.
+- [ ] **Step 3: Define exact domain types**
 
-- [ ] **Step 3: Implement the validator**
-
-Define:
+Add:
 
 ```ts
 export interface GuestInput {
@@ -307,69 +316,51 @@ export interface RsvpInput {
 }
 ```
 
-`ValidationError` contains `fieldErrors: Record<string,string>` and returns a stable message `Validation failed`.
+- [ ] **Step 4: Implement exact validation**
 
-Implement helpers that trim strings, reject required blanks, enforce exact maximum lengths, validate booleans, and enforce the three attendance constants. Use the exact spec limits.
+`ValidationError` exposes `fieldErrors: Record<string,string>` and message `Validation failed`. Enforce all approved limits: contact/person names 120; address lines 160; city/state 100; postal 32; phone 40; email 254; help/bring 1000; comments 2000; 1–50 people; exactly three attendance values; trimmed required fields; practical email rule from the spec.
 
-- [ ] **Step 4: Verify GREEN**
+- [ ] **Step 5: Run GREEN and commit**
+
+Run:
 
 ```bash
 npm test -- test/validation.test.ts
 npm run typecheck
 ```
 
-Expected: all validation tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/types.ts src/validation.ts test/validation.test.ts
-git commit -m "feat: validate RSVP submissions"
-```
+Commit `feat: validate RSVP submissions`.
 
 ---
 
-### Task 3: Implement token security and same-origin protections
+### Task 3: Implement token security, origin guard, and response headers
 
 **Files:**
 - Create: `src/security.ts`
 - Create: `test/security.test.ts`
 
 **Interfaces:**
-- Produces `generateEditToken(): string`.
-- Produces `hashEditToken(token: string): Promise<string>`.
-- Produces `readBearerToken(request: Request): string | null`.
-- Produces `assertAllowedOrigin(request: Request): void` for state-changing requests.
-- Produces `withSecurityHeaders(response: Response): Response`.
+- `generateEditToken(): string`
+- `hashEditToken(token: string): Promise<string>`
+- `readBearerToken(request: Request): string | null`
+- `assertAllowedOrigin(request: Request): void`
+- `withSecurityHeaders(response: Response): Response`
 
 - [ ] **Step 1: Write failing tests**
 
-Verify:
-- generated tokens decode to 32 bytes;
-- two generated tokens differ;
-- SHA-256 output is 64 lowercase hex chars;
-- bearer parsing accepts exactly `Bearer <token>`;
-- mismatched `Origin` throws/rejects;
-- matching `Origin` passes;
-- security headers are present.
+Verify 32 decoded token bytes, token uniqueness, 64-char lowercase hash, strict bearer parsing, mismatched-origin rejection, matching-origin acceptance, and required headers.
 
-- [ ] **Step 2: Confirm RED**
+- [ ] **Step 2: Run RED**
 
-```bash
-npm test -- test/security.test.ts
-```
+Run `npm test -- test/security.test.ts`.
 
 - [ ] **Step 3: Implement token helpers**
 
-Use `crypto.getRandomValues(new Uint8Array(32))`, base64url encoding without padding, and `crypto.subtle.digest('SHA-256', ...)`.
+Use `crypto.getRandomValues(new Uint8Array(32))`, base64url without padding, and `crypto.subtle.digest('SHA-256', ...)`.
 
-- [ ] **Step 4: Implement origin guard**
+- [ ] **Step 4: Implement origin and headers**
 
-For `POST`, `PUT`, `PATCH`, and `DELETE`, compare `new URL(request.url).origin` against the `Origin` header when present. Throw a dedicated error on mismatch. Do not add CORS response headers.
-
-- [ ] **Step 5: Implement security headers**
-
-Set:
+For `POST`, `PUT`, `PATCH`, and `DELETE`, reject a present `Origin` that differs from `new URL(request.url).origin`. Set:
 
 ```text
 Referrer-Policy: no-referrer
@@ -377,18 +368,13 @@ X-Content-Type-Options: nosniff
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-- [ ] **Step 6: Verify GREEN and commit**
+- [ ] **Step 5: Run GREEN and commit**
 
-```bash
-npm test -- test/security.test.ts
-npm run typecheck
-git add src/security.ts test/security.test.ts
-git commit -m "feat: secure RSVP edit tokens and requests"
-```
+Run `npm test -- test/security.test.ts && npm run typecheck` and commit `feat: secure RSVP edit tokens and requests`.
 
 ---
 
-### Task 4: Implement D1 persistence and public create/edit APIs
+### Task 4: Implement D1 persistence and public create/edit API
 
 **Files:**
 - Create: `src/db.ts`
@@ -396,74 +382,52 @@ git commit -m "feat: secure RSVP edit tokens and requests"
 - Modify: `src/index.ts`
 
 **Interfaces:**
-- Produces `createHousehold(db, input, editTokenHash)` returning household ID and timestamps.
-- Produces `getHouseholdByTokenHash(db, hash)` returning household plus ordered people without token hash.
-- Produces `updateHouseholdByTokenHash(db, hash, input)`.
-- Produces public routes `POST /api/rsvps`, `GET /api/rsvps/edit`, `PUT /api/rsvps/edit`.
+- `createHousehold(db, input, editTokenHash)`
+- `getHouseholdByTokenHash(db, hash)`
+- `updateHouseholdByTokenHash(db, hash, input)`
+- `POST /api/rsvps`
+- `GET /api/rsvps/edit`
+- `PUT /api/rsvps/edit`
 
-- [ ] **Step 1: Configure Workers Vitest D1 testing**
+- [ ] **Step 1: Apply migration to local test D1**
 
-Configure `vitest.config.ts` to use `defineWorkersConfig` and the migration directory so integration tests run against isolated D1 storage.
+Run `npm run db:migrate:local`. Expected: `0001_initial.sql` applies successfully.
 
-- [ ] **Step 2: Write failing create tests**
+- [ ] **Step 2: Write failing creation tests**
 
-Test `POST /api/rsvps` with two people. Assert:
-- status `201`;
-- JSON contains `editUrl` beginning `/edit#token=`;
-- household and two guest rows exist;
-- person attendance is stored independently;
-- raw token text does not appear anywhere in the household table;
-- token hash is 64 lowercase hex chars.
+Submit two people with different attendance states. Assert `201`, returned `editUrl` begins `/edit#token=`, one household and two guest rows exist, attendance is independent, raw token is absent from D1, and stored token hash matches lowercase 64-char SHA-256 form.
 
-- [ ] **Step 3: Implement create persistence**
+- [ ] **Step 3: Implement atomic creation**
 
-Generate UUIDs with `crypto.randomUUID()`, timestamps with `new Date().toISOString()`, and use one D1 `batch()` containing household insert plus ordered guest inserts. Never interpolate user text into SQL.
+Use UUIDs from `crypto.randomUUID()`, ISO timestamps, parameterized D1 prepared statements, and one `DB.batch()` containing the household insert plus ordered guest inserts.
 
 - [ ] **Step 4: Implement `POST /api/rsvps`**
 
-Flow:
-1. `assertAllowedOrigin(request)`.
-2. Parse JSON, returning `400` for malformed JSON.
-3. `validateRsvpInput`.
-4. Generate token and hash.
-5. Persist batch.
-6. Return `201` JSON `{ "editUrl": "/edit#token=<raw-token>" }`.
-7. Map validation errors to `{ error: 'Validation failed', fieldErrors }`.
-8. Map unexpected errors to generic `{ error: 'Unable to save RSVP' }` status `500`.
+Sequence: origin guard → JSON parse → validation → token generation/hash → D1 batch → `201 { editUrl }`. Map malformed/validation input to `400`; unexpected failures to generic `500 { error: 'Unable to save RSVP' }`.
 
-- [ ] **Step 5: Write failing edit-load isolation tests**
+- [ ] **Step 5: Write failing private-load isolation tests**
 
-Create two households, then verify household A's bearer token returns only A and cannot access B. Missing/invalid bearer tokens must return the same generic `404` body.
+Create two households. Verify token A loads only A, token B loads only B, and missing/random tokens return the same generic `404` response.
 
 - [ ] **Step 6: Implement `GET /api/rsvps/edit`**
 
-Read bearer token, hash it, query by hash, and return only editable household fields and people. Never return `edit_token_hash`.
+Read bearer token, hash it, fetch the matching household plus ordered people, and never return `edit_token_hash`.
 
 - [ ] **Step 7: Write failing edit-update tests**
 
-Update contact data, change one person's attendance, remove a person, and add a new person. Assert update is atomic and the edit token continues working.
+Change contact fields, change attendance, remove one person, add another. Assert the edit token remains valid and the write is atomic.
 
 - [ ] **Step 8: Implement `PUT /api/rsvps/edit`**
 
-Validate origin and payload. Use a D1 batch to update the household, delete existing people, and insert the new validated people list in order. Preserve `created_at` and edit-token hash; update only `updated_at`.
+Origin guard + validation. Batch household update, delete existing people, insert replacement people. Preserve `created_at` and `edit_token_hash`; update `updated_at`.
 
-- [ ] **Step 9: Verify public API**
+- [ ] **Step 9: Verify and commit**
 
-```bash
-npm test -- test/api.test.ts
-npm run typecheck
-```
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add src/db.ts src/index.ts test/api.test.ts vitest.config.ts
-git commit -m "feat: add RSVP create and private edit APIs"
-```
+Run `npm test -- test/api.test.ts && npm run typecheck` and commit `feat: add RSVP create and private edit APIs`.
 
 ---
 
-### Task 5: Build the public mobile RSVP experience
+### Task 5: Build the public mobile RSVP form
 
 **Files:**
 - Modify: `public/index.html`
@@ -472,50 +436,39 @@ git commit -m "feat: add RSVP create and private edit APIs"
 
 **Interfaces:**
 - Consumes `POST /api/rsvps`.
-- Stores raw token parsed from returned `editUrl` under localStorage key `engagementPartyEditToken`.
-- Provides repeatable person rows with name + attendance.
+- Saves the raw token under localStorage key `engagementPartyEditToken`.
 
-- [ ] **Step 1: Build semantic form markup**
+- [ ] **Step 1: Build semantic sections**
 
-Sections: Contact, People in your group/family, Help with preparations, Bring something, Notes. Use explicit labels, `autocomplete` attributes, `type=email`, `type=tel`, and radio/select controls for attendance.
+Create Contact, People in your group/family, Help with preparations, Bring something, and Notes sections with explicit labels, `autocomplete`, `type="email"`, and `type="tel"` where applicable.
 
-- [ ] **Step 2: Implement repeatable people UI**
+- [ ] **Step 2: Build repeatable person controls**
 
-Start with one person row. `Add another person` appends a row without mutating existing rows. Removal is allowed while at least one person remains. Each row has name and attendance.
+Start with one row. `Add another person` appends without altering existing values. Removal works while at least one row remains. Each row captures name plus attendance.
 
-- [ ] **Step 3: Implement conditional help/bring details**
+- [ ] **Step 3: Build conditional help/bring controls**
 
-Yes reveals the details field and marks it required; No hides it and clears it from the submission payload.
+Yes reveals and requires its details field. No hides it and sends `null`.
 
-- [ ] **Step 4: Implement submit behavior**
+- [ ] **Step 4: Submit safely**
 
-Serialize form data to the exact `RsvpInput` JSON shape. Disable submit while in flight. On `400`, map `fieldErrors` to accessible inline error elements. On network/500 errors, keep all entered values intact.
+Serialize the exact `RsvpInput` shape, disable duplicate submit while in flight, map server `fieldErrors` to accessible inline messages, and preserve all values on recoverable failures.
 
-- [ ] **Step 5: Implement success state and private link handling**
+- [ ] **Step 5: Build success/edit-link behavior**
 
-Parse the fragment token from returned `editUrl`, store it in localStorage, and render:
-- confirmation message;
-- `Copy private edit link` button using `location.origin + editUrl`;
-- privacy warning.
+Store the token from the returned fragment URL. Show confirmation, a `Copy private edit link` button using `location.origin + editUrl`, and a privacy warning.
 
-- [ ] **Step 6: Implement repeat-scan banner**
+- [ ] **Step 6: Build repeat-scan behavior**
 
-On root page load, if localStorage contains the edit token, show `Update your RSVP` linking to `/edit#token=<token>` and `Submit another household/group`, which dismisses the banner without deleting the saved token.
+If localStorage has a token, show `Update your RSVP` linking to `/edit#token=<stored-token>` and `Submit another household/group`.
 
-- [ ] **Step 7: Make the form mobile-first**
+- [ ] **Step 7: Mobile/accessibility QA**
 
-Ensure minimum 44px tap targets, readable 16px+ inputs, single-column layout on phones, constrained readable width on larger screens, visible focus states, and non-color-only error/success cues.
+Use 44px+ tap targets, 16px+ inputs, visible focus states, single-column phone layout, and non-color-only status messages. Verify no entered person values disappear when adding/removing another row.
 
-- [ ] **Step 8: Manual local QA**
+- [ ] **Step 8: Commit**
 
-Run `npm run dev`; use a narrow browser viewport and verify add/remove, conditional fields, submit preservation, and success-link copy.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add public/index.html public/styles.css public/rsvp.js
-git commit -m "feat: build mobile household RSVP form"
-```
+Commit `feat: build mobile household RSVP form`.
 
 ---
 
@@ -527,39 +480,37 @@ git commit -m "feat: build mobile household RSVP form"
 - Modify: `public/styles.css`
 
 **Interfaces:**
-- Consumes `GET /api/rsvps/edit` and `PUT /api/rsvps/edit` with `Authorization: Bearer <token>`.
-- Reads token only from `location.hash` or localStorage; never writes it into query parameters.
+- Consumes `GET /api/rsvps/edit` and `PUT /api/rsvps/edit` with bearer token.
 
-- [ ] **Step 1: Build edit shell and loading/error states**
+- [ ] **Step 1: Build loading, invalid-link, form, and success states**
 
-Provide a loading message, generic invalid-link state, and the same editable field groups as the creation form.
+The form mirrors the public form fields and person controls.
 
-- [ ] **Step 2: Read and validate the fragment token**
+- [ ] **Step 2: Read token from fragment**
 
-Use `URLSearchParams(location.hash.slice(1)).get('token')`. If absent, fall back to localStorage. If still absent, show a generic unavailable message and do not call the API.
+Use:
 
-- [ ] **Step 3: Load current RSVP**
+```js
+const token = new URLSearchParams(location.hash.slice(1)).get('token') || localStorage.getItem('engagementPartyEditToken');
+```
 
-Call `GET /api/rsvps/edit` with bearer authorization and populate every contact, person, help, bring, and comments field.
+If absent, show the generic invalid-link state and make no API request.
+
+- [ ] **Step 3: Load and populate the RSVP**
+
+Call `GET /api/rsvps/edit` with `Authorization: Bearer ${token}` and populate all fields/people.
 
 - [ ] **Step 4: Submit edits**
 
-Call `PUT /api/rsvps/edit` with the same bearer token and validated UI payload. Preserve values on recoverable errors and show `Your RSVP has been updated` on success.
+Call `PUT /api/rsvps/edit` with the same bearer token and normalized payload. Preserve form values on recoverable errors and show `Your RSVP has been updated` on success.
 
-- [ ] **Step 5: Manual isolation check**
+- [ ] **Step 5: Manual isolation check and commit**
 
-Confirm changing the fragment to a random token produces only the generic invalid-link state.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add public/edit.html public/edit.js public/styles.css
-git commit -m "feat: add private RSVP editing"
-```
+Random fragments must show only the generic invalid-link state. Commit `feat: add private RSVP editing`.
 
 ---
 
-### Task 7: Implement admin data, stats, editing, and CSV APIs
+### Task 7: Implement admin stats, search/filter, editing, and CSV APIs
 
 **Files:**
 - Create: `src/admin.ts`
@@ -570,19 +521,18 @@ git commit -m "feat: add private RSVP editing"
 - Modify: `test/api.test.ts`
 
 **Interfaces:**
-- Produces `GET /api/admin/stats`.
-- Produces `GET /api/admin/rsvps?search=&attendance=&help=&bring=`.
-- Produces `PUT /api/admin/rsvps/:id`.
-- Produces `GET /api/admin/export.csv`.
-- Produces `toCsv(rows): string` with RFC-style quoting for commas, quotes, and newlines.
+- `GET /api/admin/stats`
+- `GET /api/admin/rsvps?search=&attendance=&help=&bring=`
+- `PUT /api/admin/rsvps/:id`
+- `GET /api/admin/export.csv`
 
 - [ ] **Step 1: Write failing stats tests**
 
-Seed multiple households with mixed attendance/help/bring states. Assert household count, total people, all three attendance totals, willing-to-help households, and willing-to-bring households.
+Seed mixed households and assert households, people, attending, not-attending, unsure, willing-to-help, and willing-to-bring counts.
 
 - [ ] **Step 2: Implement stats query**
 
-Use aggregate SQL; return numeric JSON properties:
+Return:
 
 ```ts
 {
@@ -596,42 +546,33 @@ Use aggregate SQL; return numeric JSON properties:
 }
 ```
 
-- [ ] **Step 3: Write failing list/filter/search tests**
+- [ ] **Step 3: Write failing search/filter tests**
 
-Test primary contact search, individual guest-name search, email/phone search, attendance filter, help filter, and bring filter. Returned household objects include ordered `people` arrays and never include token hashes.
+Cover primary contact name, individual guest name, email, phone, attendance, help, and bring filters. Results include ordered `people` and exclude token hashes.
 
-- [ ] **Step 4: Implement admin list query**
+- [ ] **Step 4: Implement parameterized list/search/filter queries**
 
-Use parameterized SQL and constrained filter values. Avoid interpolating search text into SQL strings; use bound `%term%` patterns.
+Bind `%search%` as a value; never interpolate user search text into SQL. Constrain filter values before querying.
 
-- [ ] **Step 5: Write failing admin-update test**
+- [ ] **Step 5: Write failing admin-update test and implement update**
 
-Update by household ID and verify the same validation rules as the guest edit API apply.
+Reuse `validateRsvpInput`; batch household update + guest replacement by household ID without modifying edit-token hash.
 
-- [ ] **Step 6: Implement admin update**
+- [ ] **Step 6: Write failing CSV tests**
 
-Reuse `validateRsvpInput`; update household/people atomically by ID without changing the edit token hash.
+Assert exactly one row per person, repeated household fields, correct comma/quote/newline escaping, and no token fields.
 
-- [ ] **Step 7: Write failing CSV tests**
+- [ ] **Step 7: Implement safe CSV**
 
-Assert one row per person, repeated household fields, correct quote escaping, and absence of `edit_token_hash`, raw token, or any token column.
+Use the approved columns in order. Before CSV quoting, prefix cells whose first character is `=`, `+`, `-`, or `@` with `'` to reduce spreadsheet-formula injection risk.
 
-- [ ] **Step 8: Implement CSV generation**
+- [ ] **Step 8: Wire export response**
 
-Columns exactly match the approved spec. Prefix cells beginning with `=`, `+`, `-`, or `@` with a single quote before CSV encoding to reduce spreadsheet formula injection risk.
+Set `Content-Type: text/csv; charset=utf-8` and `Content-Disposition: attachment; filename="engagement-party-rsvps.csv"`.
 
-- [ ] **Step 9: Wire admin routes**
+- [ ] **Step 9: Verify and commit**
 
-Return `text/csv; charset=utf-8` and `Content-Disposition: attachment; filename="engagement-party-rsvps.csv"` for export.
-
-- [ ] **Step 10: Verify and commit**
-
-```bash
-npm test -- test/api.test.ts test/csv.test.ts
-npm run typecheck
-git add src/admin.ts src/csv.ts src/db.ts src/index.ts test/api.test.ts test/csv.test.ts
-git commit -m "feat: add organizer RSVP management APIs"
-```
+Run `npm test -- test/api.test.ts test/csv.test.ts && npm run typecheck` and commit `feat: add organizer RSVP management APIs`.
 
 ---
 
@@ -644,42 +585,35 @@ git commit -m "feat: add organizer RSVP management APIs"
 
 **Interfaces:**
 - Consumes all `/api/admin/*` endpoints.
-- Assumes Cloudflare Access handles organizer authentication in production.
+- Relies on Cloudflare Access for organizer authentication in production.
 
-- [ ] **Step 1: Build dashboard summary cards**
+- [ ] **Step 1: Render seven summary metrics**
 
-Display all seven aggregate metrics with text labels.
+Households, total people, attending, not attending, unsure, willing to help, willing to bring.
 
 - [ ] **Step 2: Add search and filters**
 
-Controls: search text, attendance (`all`, three states), willing to help (`all`, `yes`, `no`), willing to bring (`all`, `yes`, `no`). Debounce search and refetch data.
+Search text plus attendance, help, and bring filters. Debounce text input and refetch data.
 
 - [ ] **Step 3: Render expandable household cards**
 
-Each card shows primary contact, email/phone, address, timestamps, people and attendance, help/bring details, and comments. Escape by assigning user content through `textContent`, never `innerHTML`.
+Show contact info, complete address, timestamps, people/attendance, help details, bring details, and comments. Put user content into DOM with `textContent`, never `innerHTML`.
 
-- [ ] **Step 4: Add organizer edit mode**
+- [ ] **Step 4: Add organizer editing**
 
-Reuse the same conceptual field structure as the guest form. Submit to `PUT /api/admin/rsvps/:id`, then refetch stats/list.
+Edit the same household/person fields and submit to `PUT /api/admin/rsvps/:id`; refetch list and stats after success.
 
-- [ ] **Step 5: Add CSV export action**
+- [ ] **Step 5: Add CSV download**
 
-Link/button navigates to `/api/admin/export.csv` so the authenticated Access session downloads the file.
+Navigate to `/api/admin/export.csv` using the authenticated browser session.
 
-- [ ] **Step 6: Mobile QA**
+- [ ] **Step 6: Mobile QA and commit**
 
-Verify dashboard cards stack on phone widths, filters remain usable, long addresses/comments wrap, and edit controls do not overflow.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add public/admin.html public/admin.js public/styles.css
-git commit -m "feat: build organizer RSVP dashboard"
-```
+Verify stacked cards, wrapping long text, non-overflowing controls, and usable filters on phone width. Commit `feat: build organizer RSVP dashboard`.
 
 ---
 
-### Task 9: Finish route behavior, security headers, and regression tests
+### Task 9: Centralize routing/error behavior and finish regression coverage
 
 **Files:**
 - Modify: `src/index.ts`
@@ -687,121 +621,107 @@ git commit -m "feat: build organizer RSVP dashboard"
 - Modify: `test/security.test.ts`
 
 **Interfaces:**
-- All responses pass through `withSecurityHeaders`.
+- All Worker responses receive security headers.
 - Unsupported API methods return `405`.
 - Unknown API paths return JSON `404`.
-- Non-API paths delegate to assets.
+- Non-API paths delegate to static assets.
 
 - [ ] **Step 1: Add failing regression tests**
 
-Cover malformed JSON `400`, unsupported methods `405`, unknown API `404`, generic `500`, cross-origin state-changing rejection, response security headers, and no stack/database details in public errors.
+Cover malformed JSON `400`, unsupported method `405`, unknown API `404`, generic `500`, mismatched origin rejection, security headers, and absence of database/stack details in public failures.
 
-- [ ] **Step 2: Implement centralized route/error handling**
+- [ ] **Step 2: Implement centralized routing/error mapping**
 
-Route explicitly by method + pathname. Keep public and admin route namespaces clear. Never create a public list/search route for households.
+Route by method + pathname. Keep public and admin namespaces separate. Do not add any public household list/search endpoint.
 
-- [ ] **Step 3: Apply security headers to API and asset responses**
+- [ ] **Step 3: Apply security headers to API and static asset responses**
 
-Wrap both API responses and `env.ASSETS.fetch()` responses with `withSecurityHeaders`.
+Wrap both generated API responses and `env.ASSETS.fetch(request)` responses.
 
-- [ ] **Step 4: Run full verification**
+- [ ] **Step 4: Full automated verification and commit**
+
+Run:
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-Expected: all tests pass; typecheck clean.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/index.ts test/api.test.ts test/security.test.ts
-git commit -m "test: harden worker routing and security"
-```
+Expected: all tests pass and typecheck is clean. Commit `test: harden worker routing and security`.
 
 ---
 
-### Task 10: Create Cloudflare resources, deploy, and protect admin routes
+### Task 10: Apply production D1 migration and deploy Worker
 
 **Files:**
-- Modify: `wrangler.jsonc`
 - Create/Modify: `README.md`
 
 **Interfaces:**
-- Produces the public production Worker URL.
-- Produces a live D1 database with migration applied.
-- Produces Cloudflare Access protection for `/admin*` and `/api/admin/*`.
+- Produces the live Worker URL and production D1 schema.
 
-- [ ] **Step 1: Authenticate Wrangler**
+- [ ] **Step 1: Apply remote migration**
 
-```bash
-npx wrangler whoami
-```
+Run `npm run db:migrate:remote`. Expected: `0001_initial.sql` applies successfully to `engagement-party-db`.
 
-If not authenticated, complete `npx wrangler login`, then rerun `whoami` and confirm the intended Cloudflare account.
+- [ ] **Step 2: Deploy**
 
-- [ ] **Step 2: Create D1 database**
+Run `npm run deploy`. Record the exact deployed Worker URL printed by Wrangler.
 
-```bash
-npx wrangler d1 create engagement-party-db
-```
+- [ ] **Step 3: Smoke-test public routes**
 
-Copy the returned `database_id` into `wrangler.jsonc` replacing `REPLACE_AFTER_D1_CREATION`.
+Verify `/` and `/edit` load successfully and a real test household can submit and edit.
 
-- [ ] **Step 3: Apply remote migration**
+- [ ] **Step 4: Document deployment**
 
-```bash
-npm run db:migrate:remote
-```
+`README.md` must contain install, test, local dev, D1 migration, deploy, Access configuration, PII warning, and the exact production root URL.
 
-Expected: `0001_initial.sql` applies successfully.
+- [ ] **Step 5: Commit**
 
-- [ ] **Step 4: Deploy Worker**
-
-```bash
-npm run deploy
-```
-
-Record the resulting `https://...workers.dev` hostname.
-
-- [ ] **Step 5: Configure Cloudflare Access**
-
-In Cloudflare Zero Trust, create self-hosted Access application coverage for the production hostname with paths covering both `/admin*` and `/api/admin/*`. Add an Allow policy restricted to the organizer email address(es) approved by the user. Do not include `/`, `/edit`, `/api/rsvps`, or `/api/rsvps/edit` in the protected path set.
-
-- [ ] **Step 6: Verify Access boundary externally**
-
-Using a signed-out/private browser session:
-- `/` opens without Access login;
-- `/edit` opens without Access login;
-- `/admin` prompts for Access authentication;
-- `/api/admin/stats` prompts/denies without Access authentication;
-- public APIs remain reachable only for their intended operations.
-
-Do not treat admin protection as complete until the API route itself is confirmed protected.
-
-- [ ] **Step 7: Add deployment README**
-
-Document install, tests, local dev, D1 create/migrate, deployment, Access path rules, and where to find the Worker URL. Include a warning that RSVP data contains PII and admin routes must remain behind Access.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add wrangler.jsonc README.md
-git commit -m "docs: add Cloudflare deployment and Access setup"
-```
+Commit `docs: add Cloudflare deployment instructions`.
 
 ---
 
-### Task 11: Production acceptance QA and final QR readiness
+### Task 11: Configure and verify Cloudflare Access protection
 
 **Files:**
-- Modify: `README.md` with final production URL and acceptance checklist evidence.
+- Modify: `README.md` with exact Access path policy used.
 
 **Interfaces:**
-- Confirms every acceptance criterion in the approved spec.
+- Protects `/admin*` and `/api/admin/*` while leaving public RSVP/edit routes open.
 
-- [ ] **Step 1: Run automated gates from a clean install**
+- [ ] **Step 1: Create self-hosted Access coverage**
+
+For the production hostname, configure Access path coverage for both `/admin*` and `/api/admin/*`. Add an Allow policy containing only organizer email address(es) approved by the user.
+
+- [ ] **Step 2: Verify signed-out behavior**
+
+In a private browser session:
+- `/` loads without Access login.
+- `/edit` loads without Access login.
+- `/admin` requires Access authentication.
+- `/api/admin/stats` requires Access authentication.
+
+Admin protection is incomplete unless both the visible dashboard and the admin API are blocked when signed out.
+
+- [ ] **Step 3: Verify authenticated behavior**
+
+Authenticate as an approved organizer and confirm stats, list, edits, and CSV export work.
+
+- [ ] **Step 4: Record policy and commit**
+
+Record the deployed hostname and protected path families in `README.md`. Commit `docs: record admin Access protection`.
+
+---
+
+### Task 12: Production acceptance QA and QR readiness
+
+**Files:**
+- Modify: `README.md` with final acceptance evidence.
+
+**Interfaces:**
+- Confirms all nine acceptance criteria in the approved spec.
+
+- [ ] **Step 1: Run clean automated gates**
 
 ```bash
 npm ci
@@ -813,39 +733,32 @@ Expected: all commands pass.
 
 - [ ] **Step 2: Test a real multi-person RSVP**
 
-On the deployed URL, submit a household with at least three people using different attendance states. Verify success and copy the private edit link.
+Submit at least three named people with mixed attendance states. Verify help/bring conditional details and copy the private edit link.
 
-- [ ] **Step 3: Test repeat-scan behavior**
+- [ ] **Step 3: Test repeat scan/root revisit**
 
-Return to `/` on the same device/browser and verify `Update your RSVP` appears and opens the saved household.
+Return to `/` on the same device and verify `Update your RSVP` opens the correct household.
 
-- [ ] **Step 4: Test cross-device private edit link**
+- [ ] **Step 4: Test cross-device private editing**
 
-Open the copied edit link in another browser/device, update one person's status, and verify the admin dashboard reflects the change.
+Open the private link in a different browser/device, change attendance, and verify the dashboard updates.
 
-- [ ] **Step 5: Test organizer flows**
+- [ ] **Step 5: Test privacy boundary**
 
-Authenticate through Cloudflare Access; verify stats, search, filters, household expansion, organizer edit, and CSV download.
+Signed out, verify admin UI/API are blocked, random edit tokens return the same generic not-found state, and no public list/search endpoint exists.
 
-- [ ] **Step 6: Test privacy boundary**
+- [ ] **Step 6: Test organizer workflows**
 
-In a signed-out private session, verify admin UI/API remain blocked, random edit tokens return a generic not-found state, and there is no public response directory/search endpoint.
+Verify dashboard totals, text search, all filters, household expansion, organizer edits, and CSV download.
 
 - [ ] **Step 7: Test mobile layout**
 
-Verify on Android and an iPhone-class viewport: no horizontal overflow, usable add/remove controls, readable form labels, visible validation, and successful submission/editing.
+Verify Android and iPhone-class viewport behavior: no horizontal overflow, usable add/remove controls, readable labels, visible validation, successful submit, and successful edit.
 
-- [ ] **Step 8: Record the production URL**
+- [ ] **Step 8: Mark the exact production URL QR-ready**
 
-Add the exact deployed root URL to `README.md`. This is the URL that the final engagement-party QR code should encode.
+Record the verified URL in `README.md` only after every acceptance check passes. That exact root URL is the value to encode in the engagement-party QR code.
 
-- [ ] **Step 9: Final commit**
+- [ ] **Step 9: Final commit and verification**
 
-```bash
-git add README.md
-git commit -m "chore: record production RSVP readiness"
-```
-
-- [ ] **Step 10: Final verification**
-
-Confirm the repository is clean and the deployed commit matches the verified commit. Only then mark the production URL as ready for QR-code distribution.
+Commit `chore: record production RSVP readiness`, confirm the repository is clean, and verify the deployed commit is the same commit that passed acceptance QA.
