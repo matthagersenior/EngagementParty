@@ -41,7 +41,8 @@ describe('wedding branding', () => {
       if (path.endsWith('.svg')) {
         const svg = await response.text();
         expect(svg).toContain('data:image/jpeg;base64,');
-        expect(svg).toContain('https://engagement-party.matthagersr.workers.dev/');
+        expect(svg).toContain('Wedding RSVP QR code');
+        expect(svg).toContain('shape-rendering="crispEdges"');
       }
     }
   });
