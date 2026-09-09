@@ -25,19 +25,24 @@ describe('wedding branding', () => {
 
   it('links the printable photo QR code from the organizer dashboard', async () => {
     const html = await page('/admin');
-    expect(html).toContain('/images/michael-marisa-rsvp-qr.png');
+    expect(html).toContain('/images/michael-marisa-rsvp-qr.svg');
     expect(html).toContain('Wedding RSVP QR code');
   });
 
-  it('serves the approved wedding image assets', async () => {
+  it('serves the approved wedding image assets and a self-contained QR', async () => {
     for (const [path, type] of [
       ['/images/michael-marisa-ring.webp', 'image/webp'],
       ['/images/michael-marisa-couple.webp', 'image/webp'],
-      ['/images/michael-marisa-rsvp-qr.png', 'image/png'],
+      ['/images/michael-marisa-rsvp-qr.svg', 'image/svg+xml'],
     ] as const) {
       const response = await exports.default.fetch(`${origin}${path}`);
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain(type);
+      if (path.endsWith('.svg')) {
+        const svg = await response.text();
+        expect(svg).toContain('data:image/jpeg;base64,');
+        expect(svg).toContain('https://engagement-party.matthagersr.workers.dev/');
+      }
     }
   });
 });
