@@ -22,4 +22,10 @@ describe('wedding branding', () => {
     expect(html).toContain('/images/michael-marisa-ring.webp');
     expect(html).toContain('/images/michael-marisa-couple.webp');
   });
+
+  it('links the printable photo QR code from the organizer dashboard', async () => {
+    const html = await page('/admin');
+    expect(html).toContain('/images/michael-marisa-rsvp-qr.png');
+    expect(html).toContain('Wedding RSVP QR code');
+  });
 });
