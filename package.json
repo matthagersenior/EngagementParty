@@ -1,0 +1,21 @@
+{
+  "name": "engagement-party",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply engagement-party-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply engagement-party-db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.5",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.129.1"
+  }
+}
