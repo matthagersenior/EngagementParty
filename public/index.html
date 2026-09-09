@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#fffaf6">
+  <title>Engagement Party RSVP</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/rsvp.js"></script>
+</head>
+<body>
+  <main class="site-shell">
+    <header class="hero">
+      <div class="hero-mark" aria-hidden="true">♡</div>
+      <h1>Engagement Party RSVP</h1>
+      <p class="lead">We’re excited to celebrate together. Please tell us who is coming and anything you’d be happy to help with or bring.</p>
+    </header>
+
+    <section class="card edit-offer" data-edit-offer hidden aria-label="Existing RSVP">
+      <h2>Already responded?</h2>
+      <p>This device has a saved RSVP edit link.</p>
+      <div class="actions">
+        <a class="button button-secondary" data-update-link href="/edit">Update your RSVP</a>
+        <button class="button button-quiet" type="button" data-another-household>Submit another household/group</button>
+      </div>
+    </section>
+
+    <section class="success" data-success hidden tabindex="-1">
+      <h2>Thank you — your RSVP is saved.</h2>
+      <p>Keep this private link if you need to change attendance, helpers, or what you’re bringing later.</p>
+      <label class="field">Private edit link
+        <input data-private-link type="text" readonly>
+      </label>
+      <div class="actions">
+        <button class="button button-secondary" type="button" data-copy-link>Copy private edit link</button>
+        <a class="button button-quiet" href="/">Return to RSVP page</a>
+      </div>
+      <p class="muted" data-copy-status aria-live="polite"></p>
+      <p class="muted">Anyone with this link can edit this RSVP, so please keep it private.</p>
+    </section>
+
+    <form data-rsvp-form novalidate>
+      <p class="form-error" data-form-error hidden role="alert"></p>
+
+      <fieldset>
+        <legend>Primary contact</legend>
+        <div class="grid two">
+          <label class="field">Full name
+            <input name="primaryContactName" type="text" maxlength="120" autocomplete="name" required>
+            <span class="field-error" data-field-error="primaryContactName" hidden></span>
+          </label>
+          <label class="field">Phone number
+            <input name="phone" type="tel" maxlength="40" autocomplete="tel" required>
+            <span class="field-error" data-field-error="phone" hidden></span>
+          </label>
+        </div>
+        <label class="field">Email address
+          <input name="email" type="email" maxlength="254" autocomplete="email" required>
+          <span class="field-error" data-field-error="email" hidden></span>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Mailing address</legend>
+        <div class="grid">
+          <label class="field">Street address
+            <input name="addressLine1" type="text" maxlength="160" autocomplete="address-line1" required>
+            <span class="field-error" data-field-error="addressLine1" hidden></span>
+          </label>
+          <label class="field">Address line 2 <small>Optional</small>
+            <input name="addressLine2" type="text" maxlength="160" autocomplete="address-line2">
+            <span class="field-error" data-field-error="addressLine2" hidden></span>
+          </label>
+          <div class="grid two">
+            <label class="field">City
+              <input name="city" type="text" maxlength="100" autocomplete="address-level2" required>
+              <span class="field-error" data-field-error="city" hidden></span>
+            </label>
+            <label class="field">State / province
+              <input name="stateRegion" type="text" maxlength="100" autocomplete="address-level1" required>
+              <span class="field-error" data-field-error="stateRegion" hidden></span>
+            </label>
+          </div>
+          <label class="field">Postal code
+            <input name="postalCode" type="text" maxlength="32" autocomplete="postal-code" required>
+            <span class="field-error" data-field-error="postalCode" hidden></span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>People in your group or family</legend>
+        <p class="muted">Add every person by name. Attendance is recorded separately for each person.</p>
+        <div class="people-list" data-people-list></div>
+        <p class="field-error" data-field-error="people" hidden></p>
+        <button class="button button-secondary" type="button" data-add-person>+ Add another person</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>Helping with preparations</legend>
+        <p>Would your household/group be willing to help with preparations?</p>
+        <div class="choice-row">
+          <label class="choice"><input type="radio" name="willingToHelp" value="yes" required> Yes</label>
+          <label class="choice"><input type="radio" name="willingToHelp" value="no" checked> No</label>
+        </div>
+        <span class="field-error" data-field-error="willingToHelp" hidden></span>
+        <label class="field" data-help-details-block hidden>How would you like to help?
+          <textarea name="helpDetails" maxlength="1000"></textarea>
+          <span class="field-error" data-field-error="helpDetails" hidden></span>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Bringing something</legend>
+        <p>Would your household/group be willing to bring anything?</p>
+        <div class="choice-row">
+          <label class="choice"><input type="radio" name="willingToBring" value="yes" required> Yes</label>
+          <label class="choice"><input type="radio" name="willingToBring" value="no" checked> No</label>
+        </div>
+        <span class="field-error" data-field-error="willingToBring" hidden></span>
+        <label class="field" data-bring-details-block hidden>What would you be willing to bring?
+          <textarea name="bringDetails" maxlength="1000"></textarea>
+          <span class="field-error" data-field-error="bringDetails" hidden></span>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Anything else?</legend>
+        <label class="field">Comments or notes <small>Optional</small>
+          <textarea name="comments" maxlength="2000"></textarea>
+          <span class="field-error" data-field-error="comments" hidden></span>
+        </label>
+      </fieldset>
+
+      <button class="button button-primary" type="submit">Submit RSVP</button>
+    </form>
+  </main>
+</body>
+</html>
