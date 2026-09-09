@@ -8,10 +8,11 @@ Build a mobile-first engagement-party web app that opens from a QR code, collect
 - Use Cloudflare Workers Static Assets for the guest/admin frontend.
 - Use a D1 database binding named `DB` for all RSVP data.
 - Keep the public guest form and guest edit flow publicly reachable.
-- Protect `/admin` and `/api/admin/*` with a hostname/path-based Cloudflare Access self-hosted application.
+- Protect `/admin*` and `/api/admin/*` with path-scoped Cloudflare Access self-hosted application coverage.
 - Do not protect the entire Worker, because the QR RSVP form must remain public.
-- Use TypeScript throughout the Worker/API code.
+- Use TypeScript throughout Worker/API code.
 - Keep the frontend dependency-light and optimized for mobile QR entry; no full SPA framework is required for v1.
+- Use `2026-09-08` as the initial Workers compatibility date.
 
 ## Public guest flow
 ### Landing page `/`
@@ -34,7 +35,7 @@ The form collects:
 - Conditional free-text details describing what they can bring
 - Optional comments/notes
 
-The household/group is not limited to a plus-one model. Guests can add or remove as many named people as needed before submission. At least one person must be listed.
+The household/group is not limited to a plus-one model. Guests can add or remove named people as needed. At least one person and no more than 50 people may be included in one household/group submission.
 
 The help-details field is required only when `willing_to_help` is true. The bring-details field is required only when `willing_to_bring` is true.
 
@@ -44,13 +45,13 @@ The help-details field is required only when `willing_to_help` is true. The brin
 On success:
 1. Create one household record.
 2. Create one guest/person record for every named member.
-3. Generate a cryptographically random edit token.
-4. Store only a SHA-256 hash of the edit token in D1.
-5. Return a private edit URL containing the raw token.
-6. Save that edit URL/token locally in the browser so scanning the public QR again on the same device can offer `Update your RSVP`.
+3. Generate a 32-byte cryptographically random edit token and encode it as base64url.
+4. Store only the lowercase hexadecimal SHA-256 hash of the edit token in D1.
+5. Return a private edit URL whose token is stored in the URL fragment, for example `/edit#token=<token>`. URL fragments are not sent in the HTTP request for the page and therefore avoid putting the raw token in the edit-page request path.
+6. Save the edit token locally in the browser so scanning the public QR again on the same device can offer `Update your RSVP`.
 7. Show a confirmation screen with a clear `Copy private edit link` action and a warning that the link should be kept private.
 
-The server must use a transaction/batched write pattern so a household and its people are not partially created.
+The server must use a D1 batch/transactional write pattern so a household and its people are not partially created.
 
 ### Repeat scan behavior
 When `/` loads, client-side code checks for a previously saved private edit token for this app. If present, the page offers:
@@ -59,12 +60,13 @@ When `/` loads, client-side code checks for a previously saved private edit toke
 
 This lets a household scan the same event QR code again on the same device and return to its existing response without exposing a public lookup mechanism.
 
-### Private edit flow `/edit/:token`
+### Private edit flow `/edit#token=<token>`
 - The raw edit token is never stored in D1.
-- The Worker hashes the supplied token and looks up the household by `edit_token_hash`.
-- An invalid or unknown token returns a generic not-found response without revealing whether an email, phone, or household exists.
+- Client JavaScript reads the token from the URL fragment and sends it only in an `Authorization: Bearer <token>` request header to the edit API.
+- `GET /api/rsvps/edit` hashes the supplied bearer token and looks up the household by `edit_token_hash`.
+- An invalid, missing, or unknown token returns a generic not-found response without revealing whether an email, phone, or household exists.
 - A valid token loads the existing household and people into the form.
-- `PUT /api/rsvps/:token` performs full server-side validation and atomically updates household fields and replaces/reconciles the household's person list.
+- `PUT /api/rsvps/edit` performs full server-side validation and atomically updates household fields and replaces/reconciles the household's person list.
 - The edit token remains valid after normal edits.
 
 ## D1 data model
@@ -99,31 +101,54 @@ This lets a household scan the same event QR code again on the same device and r
 - Unique index on `households.edit_token_hash`
 - Index on `guests.household_id`
 - Index on `guests.attendance`
-- Index on normalized/searchable household contact fields only if required by measured admin-query performance; do not add unnecessary indexes in v1.
 
-## Validation and privacy rules
-- Trim all text input server-side.
-- Enforce reasonable maximum lengths on all free-text/contact fields.
-- Validate email format and reject obviously malformed input.
-- Validate that at least one named person exists.
-- Reject attendance values outside the three allowed states.
-- Reject `willing_to_help=true` without non-empty help details.
-- Reject `willing_to_bring=true` without non-empty bring details.
+Do not enforce uniqueness on email, phone, or names because separate households/groups may legitimately share contact information.
+
+## Exact validation rules
+All text is trimmed before validation/storage.
+
+Maximum lengths:
+- Primary contact name: 120 characters
+- Person full name: 120 characters
+- Address line 1: 160 characters
+- Address line 2: 160 characters
+- City: 100 characters
+- State/region: 100 characters
+- Postal code: 32 characters
+- Phone: 40 characters
+- Email: 254 characters
+- Help details: 1,000 characters
+- Bring details: 1,000 characters
+- Comments: 2,000 characters
+
+Additional rules:
+- Required contact/address fields must be non-empty after trimming.
+- Email must contain one `@` with non-empty text before it and a dot-containing domain after it; this is intentionally practical rather than attempting full RFC mailbox validation.
+- At least one and no more than 50 people must be present.
+- Every person name must be non-empty after trimming.
+- Attendance must be exactly `attending`, `not_attending`, or `unsure`.
+- `willing_to_help=true` requires non-empty `help_details`; when false, `help_details` is stored as null.
+- `willing_to_bring=true` requires non-empty `bring_details`; when false, `bring_details` is stored as null.
+
+## Privacy and request-security rules
 - Parameterize every D1 query.
 - Escape any user-provided content rendered into HTML.
 - Never expose the edit-token hash to the browser or admin CSV.
 - Never expose one household's response through another household's edit token.
 - Do not provide a public email/phone/name lookup endpoint.
 - Public API errors must not leak database details or stack traces.
+- Do not enable permissive CORS; API requests are same-origin only.
+- State-changing API requests must reject an `Origin` header that does not match the request origin. Requests with no `Origin` are allowed only where required for same-origin browser/navigation behavior or automated tests and must not weaken admin protection.
+- Serve `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and a restrictive Content Security Policy that permits only app-owned scripts/styles/resources needed by v1.
 - The app stores personally identifiable information, so admin data must not be available from any unprotected route.
 
 ## Organizer/admin experience
 ### Access boundary
-Cloudflare Access must protect both:
+Cloudflare Access must protect both route families:
 - `/admin*`
 - `/api/admin/*`
 
-The Access policy should allow only organizer email address(es) explicitly approved by the user. The public RSVP and edit routes remain outside the Access application.
+The Access policy should allow only organizer email address(es) explicitly approved by the user. The public RSVP and edit routes remain outside the Access application. Access must be tested against the production hostname after deployment; protecting only the visible admin HTML is insufficient.
 
 ### Dashboard `/admin`
 Display:
@@ -190,6 +215,7 @@ Do not export edit tokens or token hashes.
 - Show field-level validation messages and a top-level submission error when appropriate.
 - Disable/dedupe repeated submits while a request is in flight.
 - Success and error states must be understandable without relying on color alone.
+- The private edit token must not be rendered into visible page text except where needed to construct/copy the private edit link.
 
 ## API/error behavior
 Use JSON for API requests/responses except the CSV export.
@@ -209,11 +235,14 @@ Automated tests must cover at minimum:
 - Creating a household with multiple people
 - Attendance stored independently for each person
 - Validation requiring at least one person
+- Validation rejecting more than 50 people
+- Exact maximum-length enforcement
 - Conditional help/bring detail validation
 - Invalid attendance rejection
 - Raw edit token is never persisted
-- Valid edit token can load/update only its household
+- Valid bearer edit token can load/update only its household
 - Invalid edit token gets a generic 404
+- Cross-origin state-changing request rejection
 - Organizer update behavior
 - Admin stats calculations
 - CSV one-row-per-person shape and exclusion of edit-token data
@@ -224,7 +253,7 @@ Manual mobile QA must cover:
 - Add/remove multiple people
 - Submit and copy edit link
 - Re-scan/root revisit on same device and use saved `Update your RSVP`
-- Edit existing response
+- Open the private edit link on another browser/device and edit the correct response
 - Public route cannot retrieve other households
 - `/admin` and `/api/admin/*` trigger Cloudflare Access authentication when deployed
 - CSV download from authenticated admin session
@@ -236,13 +265,13 @@ Cloudflare resources:
 - One Worker application
 - One D1 database
 - Static assets bundled with the Worker deployment
-- One path-scoped Cloudflare Access self-hosted application covering admin UI/API paths
+- Path-scoped Cloudflare Access self-hosted application coverage for both admin UI and admin API paths
 
 Wrangler configuration must include:
-- Worker name
-- TypeScript Worker entry point
-- Current compatibility date at implementation time
-- Static asset directory/binding
+- Worker name `engagement-party`
+- TypeScript Worker entry point `src/index.ts`
+- Compatibility date `2026-09-08`
+- Static asset directory `public/` with binding `ASSETS`
 - D1 binding named `DB`
 
 Database migrations live in versioned SQL files under `migrations/` and are applied through Wrangler before production use.
@@ -264,7 +293,7 @@ These can be added later without changing the core household/person data model.
 ## Acceptance criteria
 The app is ready for the engagement party when:
 1. A QR code can point to a deployed public URL that opens quickly on a phone.
-2. A household/group can submit contact information and any number of named people.
+2. A household/group can submit contact information and between 1 and 50 named people.
 3. Attendance is recorded separately for every person.
 4. Help and bring offers are recorded once per household/group with descriptive details.
 5. Guests can safely edit their response through a private token and can return to it after scanning the event QR again on the same device.
