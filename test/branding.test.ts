@@ -28,4 +28,16 @@ describe('wedding branding', () => {
     expect(html).toContain('/images/michael-marisa-rsvp-qr.png');
     expect(html).toContain('Wedding RSVP QR code');
   });
+
+  it('serves the approved wedding image assets', async () => {
+    for (const [path, type] of [
+      ['/images/michael-marisa-ring.webp', 'image/webp'],
+      ['/images/michael-marisa-couple.webp', 'image/webp'],
+      ['/images/michael-marisa-rsvp-qr.png', 'image/png'],
+    ] as const) {
+      const response = await exports.default.fetch(`${origin}${path}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain(type);
+    }
+  });
 });
